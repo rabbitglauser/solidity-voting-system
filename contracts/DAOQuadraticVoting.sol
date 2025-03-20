@@ -5,6 +5,8 @@ import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import "@openzeppelin/contracts/token/ERC721/ERC721.sol";
 import "@openzeppelin/contracts/access/Ownable.sol";
 import "./Interfaces.sol";
+import "@openzeppelin/contracts/proxy/transparent/ProxyAdmin.sol";
+import "@openzeppelin/contracts/proxy/transparent/TransparentUpgradeableProxy.sol";
 
 contract DAOQuadraticVoting is Ownable {
     struct Candidate {
@@ -110,7 +112,7 @@ contract DAOQuadraticVoting is Ownable {
         require(proposalId < proposals.length, "Invalid proposal ID");
         Proposal storage proposal = proposals[proposalId];
         require(!proposal.executed, "Proposal already executed");
-        require(proposal.voteCount > 1000, "Not enough votes to execute"); // Set DAO threshold
+        require(proposal.voteCount > 1000, "Not enough votes to execute"); // DAO threshold
 
         proposal.executed = true;
 
