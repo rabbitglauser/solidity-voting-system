@@ -3,8 +3,14 @@ pragma solidity ^0.8.19;
 
 // Import OpenZeppelin's ERC-20 Token Standard
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import "@openzeppelin/contracts/token/ERC721/ERC721.sol";
+import "@openzeppelin/contracts/access/Ownable.sol";
 
-contract VotingSystem {
+interface IMultiSigWallet {
+    function executeTransaction(address payable to, uint256 value, bytes calldata data) external;
+}
+
+contract VotingSystem is Ownable {
     struct Candidate {
         string name;
         uint voteCount;
@@ -13,11 +19,15 @@ contract VotingSystem {
     struct Proposal {
         string description;
         uint voteCount;
-        mapping(address => bool) hasVoted;
         bool executed;
+        address newContractAddress;
+        mapping(address => bool) hasVoted;
     }
 
     IERC20 public rewardToken; // ERC-20 token used for staking & rewards
+    IERC20 public governanceToken;
+    ERC721 public voterNFT; // NFT-Based Voter ID
+    IMultiSigWallet public treasuryWallet; // Multi-Sig Wallet
     uint public rewardAmount = 10 * (10 ** 18); // 10 tokens per vote
     uint public minStakeAmount = 5 * (10 ** 18); // 5 tokens required to vote
     uint public votingStart;
@@ -42,8 +52,8 @@ contract VotingSystem {
     event CandidateAdded(string candidate);
     event VoteChanged(address indexed voter, string newCandidate);
     event Slashed(address indexed voter, uint amountLost);
-    event ProposalCreated(uint proposalId, string description);
-    event ProposalExecuted(uint proposalId);
+    event ProposalCreated(uint proposalId, string description, address newContract);
+    event ProposalExecuted(uint proposalId, address newContract);
 
     // Modifier to check if voting is open
     modifier votingOpen() {
@@ -63,9 +73,24 @@ contract VotingSystem {
         _;
     }
 
-    constructor(string[] memory _candidateNames, address _tokenAddress, uint _votingDuration) {
+    // Modifier to restrict voting to NFT holders
+    modifier onlyNFTVoter() {
+        require(voterNFT.balanceOf(msg.sender) > 0, "You need an NFT voter ID");
+        _;
+    }
+
+    constructor(
+        string[] memory _candidateNames,
+        address _tokenAddress,
+        address _nftAddress,
+        address _multiSigWallet,
+        uint _votingDuration
+    ) {
         owner = msg.sender;
         rewardToken = IERC20(_tokenAddress);
+        governanceToken = IERC20(_tokenAddress);
+        voterNFT = ERC721(_nftAddress);
+        treasuryWallet = IMultiSigWallet(_multiSigWallet);
         votingStart = block.timestamp;
         votingEnd = block.timestamp + _votingDuration;
 
@@ -184,7 +209,7 @@ contract VotingSystem {
     /**
      * @dev Quadratic voting function: vote cost increases quadratically.
      */
-    function vote(uint candidateIndex, uint votes) external votingOpen {
+    function vote(uint candidateIndex, uint votes) external votingOpen onlyNFTVoter {
         require(candidateIndex < candidates.length, "Invalid candidate index");
 
         // Quadratic cost = votes^2
@@ -199,22 +224,22 @@ contract VotingSystem {
     }
 
     /**
-     * @dev Create a new DAO proposal.
+     * @dev Create a Proposal (For Upgrading Contract).
      */
-    function createProposal(string memory _description) external {
-        proposals.push(Proposal({
-            description: _description,
-            voteCount: 0,
-            executed: false
-        }));
+    function createProposal(string memory _description, address _newContractAddress) external onlyOwner {
+        Proposal storage proposal = proposals.push();
+        proposal.description = _description;
+        proposal.voteCount = 0;
+        proposal.executed = false;
+        proposal.newContractAddress = _newContractAddress;
 
-        emit ProposalCreated(proposals.length - 1, _description);
+        emit ProposalCreated(proposals.length - 1, _description, _newContractAddress);
     }
 
     /**
      * @dev Vote on a DAO proposal (1 token = 1 vote).
      */
-    function voteOnProposal(uint proposalId) external {
+    function voteOnProposal(uint proposalId) external onlyNFTVoter {
         require(proposalId < proposals.length, "Invalid proposal ID");
         Proposal storage proposal = proposals[proposalId];
         require(!proposal.hasVoted[msg.sender], "Already voted");
@@ -227,16 +252,26 @@ contract VotingSystem {
     }
 
     /**
-     * @dev Execute a successful proposal.
+     * @dev Execute an Approved Proposal.
      */
     function executeProposal(uint proposalId) external onlyOwner {
         require(proposalId < proposals.length, "Invalid proposal ID");
         Proposal storage proposal = proposals[proposalId];
         require(!proposal.executed, "Proposal already executed");
-        require(proposal.voteCount > 1000, "Not enough votes to execute"); // Threshold
+        require(proposal.voteCount > 1000, "Not enough votes to execute"); // Set DAO threshold
 
         proposal.executed = true;
-        emit ProposalExecuted(proposalId);
+
+        // Upgrade contract logic (dummy execution, actual migration would need proxy contracts)
+        emit ProposalExecuted(proposalId, proposal.newContractAddress);
+    }
+
+    /**
+     * @dev Multi-Sig Treasury: Request Fund Release.
+     */
+    function requestTreasuryRelease(address payable _to, uint256 _amount) external onlyOwner {
+        bytes memory data;
+        treasuryWallet.executeTransaction(_to, _amount, data);
     }
 
     // Function to retrieve candidate votes
