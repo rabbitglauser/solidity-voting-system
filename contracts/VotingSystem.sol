@@ -1,14 +1,11 @@
 // SPDX-License-Identifier: UNLICENSED
 pragma solidity ^0.8.19;
 
-// Import OpenZeppelin's ERC-20 Token Standard
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import "@openzeppelin/contracts/token/ERC721/ERC721.sol";
 import "@openzeppelin/contracts/access/Ownable.sol";
-
-interface IMultiSigWallet {
-    function executeTransaction(address payable to, uint256 value, bytes calldata data) external;
-}
+import "./Interfaces.sol";
+import "./Custody.sol";
 
 contract VotingSystem is Ownable {
     struct Candidate {
@@ -16,23 +13,12 @@ contract VotingSystem is Ownable {
         uint voteCount;
     }
 
-    struct Proposal {
-        string description;
-        uint voteCount;
-        bool executed;
-        address newContractAddress;
-        mapping(address => bool) hasVoted;
-    }
-
     IERC20 public rewardToken; // ERC-20 token used for staking & rewards
-    IERC20 public governanceToken;
-    ERC721 public voterNFT; // NFT-Based Voter ID
-    IMultiSigWallet public treasuryWallet; // Multi-Sig Wallet
+    Custody public custody; // Custody contract
     uint public rewardAmount = 10 * (10 ** 18); // 10 tokens per vote
     uint public minStakeAmount = 5 * (10 ** 18); // 5 tokens required to vote
     uint public votingStart;
     uint public votingEnd;
-    address public owner;
 
     mapping(address => bool) public hasVoted;
     mapping(address => bool) public isWhitelisted;
@@ -40,11 +26,8 @@ contract VotingSystem is Ownable {
     mapping(address => uint) public voterReputation; // Reputation system
     mapping(address => bytes32) private voteHashes; // Store hashed votes
     mapping(address => uint) private voterChoices; // Track previous votes
-    mapping(address => mapping(uint => uint)) public quadraticVotes; // User's votes per candidate
 
     Candidate[] public candidates;
-    Proposal[] public proposals;
-    bool public votingEnded = false; // Track voting status
 
     event Voted(address indexed voter, string candidate);
     event Staked(address indexed voter, uint amount);
@@ -52,8 +35,6 @@ contract VotingSystem is Ownable {
     event CandidateAdded(string candidate);
     event VoteChanged(address indexed voter, string newCandidate);
     event Slashed(address indexed voter, uint amountLost);
-    event ProposalCreated(uint proposalId, string description, address newContract);
-    event ProposalExecuted(uint proposalId, address newContract);
 
     // Modifier to check if voting is open
     modifier votingOpen() {
@@ -73,24 +54,14 @@ contract VotingSystem is Ownable {
         _;
     }
 
-    // Modifier to restrict voting to NFT holders
-    modifier onlyNFTVoter() {
-        require(voterNFT.balanceOf(msg.sender) > 0, "You need an NFT voter ID");
-        _;
-    }
-
     constructor(
         string[] memory _candidateNames,
         address _tokenAddress,
-        address _nftAddress,
-        address _multiSigWallet,
+        address _custodyAddress,
         uint _votingDuration
     ) {
-        owner = msg.sender;
         rewardToken = IERC20(_tokenAddress);
-        governanceToken = IERC20(_tokenAddress);
-        voterNFT = ERC721(_nftAddress);
-        treasuryWallet = IMultiSigWallet(_multiSigWallet);
+        custody = Custody(_custodyAddress);
         votingStart = block.timestamp;
         votingEnd = block.timestamp + _votingDuration;
 
@@ -118,7 +89,7 @@ contract VotingSystem is Ownable {
 
     // Function to reveal a vote after voting ends
     function revealVote(uint candidateIndex, string memory secret) external {
-        require(votingEnded, "Voting is still open");
+        require(votingEnd < block.timestamp, "Voting is still open");
         require(voteHashes[msg.sender] != 0, "No vote found");
 
         bytes32 computedHash = keccak256(abi.encodePacked(candidateIndex, secret));
@@ -150,12 +121,8 @@ contract VotingSystem is Ownable {
         candidates[candidateIndex].voteCount += 1;
         voterChoices[msg.sender] = candidateIndex;
 
-        // Early voter bonus: first 50 voters get double rewards
-        uint bonusMultiplier = voterReputation[msg.sender] > 5 ? 2 : 1;
-        uint adjustedReward = (hasVoted[msg.sender] ? 1 : 2) * rewardAmount * bonusMultiplier;
-
-        require(rewardToken.transfer(msg.sender, adjustedReward), "Reward transfer failed");
-        voterReputation[msg.sender] += 1; // Increase reputation for future bonuses
+        // Transfer reward tokens for participation
+        require(rewardToken.transfer(msg.sender, rewardAmount), "Token transfer failed");
 
         emit Voted(msg.sender, candidates[candidateIndex].name);
     }
@@ -204,74 +171,6 @@ contract VotingSystem is Ownable {
         require(rewardToken.transfer(owner, amountSlashed), "Slashing transfer failed");
 
         emit Slashed(voter, amountSlashed);
-    }
-
-    /**
-     * @dev Quadratic voting function: vote cost increases quadratically.
-     */
-    function vote(uint candidateIndex, uint votes) external votingOpen onlyNFTVoter {
-        require(candidateIndex < candidates.length, "Invalid candidate index");
-
-        // Quadratic cost = votes^2
-        uint cost = votes * votes;
-        require(rewardToken.transferFrom(msg.sender, address(this), cost), "Token payment failed");
-
-        // Store votes and apply quadratic impact
-        quadraticVotes[msg.sender][candidateIndex] += votes;
-        candidates[candidateIndex].voteCount += votes;
-
-        emit Voted(msg.sender, candidateIndex, votes);
-    }
-
-    /**
-     * @dev Create a Proposal (For Upgrading Contract).
-     */
-    function createProposal(string memory _description, address _newContractAddress) external onlyOwner {
-        Proposal storage proposal = proposals.push();
-        proposal.description = _description;
-        proposal.voteCount = 0;
-        proposal.executed = false;
-        proposal.newContractAddress = _newContractAddress;
-
-        emit ProposalCreated(proposals.length - 1, _description, _newContractAddress);
-    }
-
-    /**
-     * @dev Vote on a DAO proposal (1 token = 1 vote).
-     */
-    function voteOnProposal(uint proposalId) external onlyNFTVoter {
-        require(proposalId < proposals.length, "Invalid proposal ID");
-        Proposal storage proposal = proposals[proposalId];
-        require(!proposal.hasVoted[msg.sender], "Already voted");
-
-        uint userBalance = rewardToken.balanceOf(msg.sender);
-        require(userBalance > 0, "No governance tokens");
-
-        proposal.voteCount += userBalance;
-        proposal.hasVoted[msg.sender] = true;
-    }
-
-    /**
-     * @dev Execute an Approved Proposal.
-     */
-    function executeProposal(uint proposalId) external onlyOwner {
-        require(proposalId < proposals.length, "Invalid proposal ID");
-        Proposal storage proposal = proposals[proposalId];
-        require(!proposal.executed, "Proposal already executed");
-        require(proposal.voteCount > 1000, "Not enough votes to execute"); // Set DAO threshold
-
-        proposal.executed = true;
-
-        // Upgrade contract logic (dummy execution, actual migration would need proxy contracts)
-        emit ProposalExecuted(proposalId, proposal.newContractAddress);
-    }
-
-    /**
-     * @dev Multi-Sig Treasury: Request Fund Release.
-     */
-    function requestTreasuryRelease(address payable _to, uint256 _amount) external onlyOwner {
-        bytes memory data;
-        treasuryWallet.executeTransaction(_to, _amount, data);
     }
 
     // Function to retrieve candidate votes

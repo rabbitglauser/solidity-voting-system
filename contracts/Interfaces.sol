@@ -1,8 +1,6 @@
 // SPDX-License-Identifier: UNLICENSED
-pragma solidity ^0.8.10;
+pragma solidity ^0.8.19;
 
-contract Interfaces {
-    constructor(){
-
-    }
+interface IMultiSigWallet {
+    function executeTransaction(address payable to, uint256 value, bytes calldata data) external;
 }
